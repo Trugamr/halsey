@@ -34,24 +34,27 @@ var downloadCmd = &cobra.Command{
 
 		log.Info("Downloading HLS stream", "url", plUrl.String())
 
-		// Download and save playlist
+		// Collect flags
 		output := cmd.Flag("output").Value.String()
-		path, err := downloadFile(plUrl, getPlaylistFilePath(output))
+
+		// Download and save playlist
+		plPath := getPlaylistFilePath(output)
+		err = downloadFile(plUrl, plPath)
 		if err != nil {
 			cobra.CheckErr("Failed to download playlist")
 		}
 
 		// Read and parse playlist
-		f, err := os.Open(*path)
+		f, err := os.Open(plPath)
 		if err != nil {
-			log.Error("Failed to open playlist file", "path", *path, "err", err)
+			log.Error("Failed to open playlist file", "path", plPath, "err", err)
 			cobra.CheckErr("Could not open playlist file")
 		}
 		defer f.Close()
 
 		pl, listType, err := m3u8.DecodeFrom(f, true)
 		if err != nil {
-			log.Error("Failed to parse playlist", "path", *path, "err", err)
+			log.Error("Failed to parse playlist", "path", plPath, "err", err)
 			cobra.CheckErr("Invalid playlist file")
 		}
 
@@ -85,19 +88,21 @@ var downloadCmd = &cobra.Command{
 				segResolvedUrl := plUrl.ResolveReference(segUrl)
 				log.Info("Downloading segment", "url", segResolvedUrl)
 
-				segPath, err := downloadFile(segResolvedUrl, getDownloadPath(getPlaylistDirectoryPath(output), segment.URI))
+				segPath := getDownloadPath(getPlaylistDirectoryPath(plPath), segment.URI)
+
+				err = downloadFile(segResolvedUrl, segPath)
 				if err != nil {
 					log.Error("Failed to download segment", "url", segResolvedUrl, "err", err)
 					cobra.CheckErr("Aborting download due to failed segment download")
 				}
 
-				log.Info("Downloaded segment", "path", *segPath)
+				log.Info("Downloaded segment", "path", segPath)
 			}
 		default:
 			cobra.CheckErr("Unknown playlist type")
 		}
 
-		log.Info("Download complete", "path", *path)
+		log.Info("Download complete", "path", plPath)
 	},
 }
 
@@ -115,11 +120,11 @@ func validateUrl(input string) (u *url.URL, err error) {
 // Download and save file
 //
 // Returns path to downloaded file
-func downloadFile(u *url.URL, path string) (*string, error) {
+func downloadFile(u *url.URL, path string) error {
 	resp, err := http.Get(u.String())
 	if err != nil {
 		log.Error("Failed to download file", "url", u.String(), "err", err)
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -129,44 +134,41 @@ func downloadFile(u *url.URL, path string) (*string, error) {
 		err := os.MkdirAll(dir, 0755)
 		if err != nil {
 			log.Error("Failed to create output directory", "path", dir, "err", err)
-			return nil, err
+			return err
 		}
 	} else if err != nil {
 		log.Error("Failed to stat output directory", "path", dir, "err", err)
-		return nil, err
+		return err
 	}
 
 	// Create output file
 	output, err := os.Create(path)
 	if err != nil {
 		log.Error("Failed to create output file", "path", path, "err", err)
-		return nil, err
+		return err
 	}
 	defer output.Close()
 
 	_, err = io.Copy(output, resp.Body)
 	if err != nil {
 		log.Error("Failed to write output file", "path", path, "err", err)
-		return nil, err
+		return err
 	}
 
-	return &path, nil
+	return nil
 }
 
 func getPlaylistFilePath(output string) string {
 	// If output is a directory, append default filename
-	if filepath.Ext(output) == "" {
+	if filepath.Ext(output) == "" || filepath.Ext(output) == "." {
 		return getDownloadPath(output, defaultPlaylistFilename)
 	}
 	return output
 }
 
-func getPlaylistDirectoryPath(output string) string {
-	// If output is a directory, return it
-	if filepath.Ext(output) == "" {
-		return output
-	}
-	return filepath.Dir(output)
+// Takes playlist output path and returns directory path
+func getPlaylistDirectoryPath(path string) string {
+	return filepath.Dir(path)
 }
 
 func getDownloadPath(dir, path string) string {
