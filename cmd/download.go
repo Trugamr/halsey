@@ -12,9 +12,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const outputDir string = "downloads"
+const defaultPlaylistFilename string = "index.m3u8"
 
 func init() {
+	downloadCmd.Flags().StringP("output", "o", "./playlist/"+defaultPlaylistFilename, "Output path for downloaded files")
+
 	rootCmd.AddCommand(downloadCmd)
 }
 
@@ -33,7 +35,8 @@ var downloadCmd = &cobra.Command{
 		log.Info("Downloading HLS stream", "url", plUrl.String())
 
 		// Download and save playlist
-		path, err := downloadFile(plUrl, getDownloadPath(outputDir, "index.m3u8"))
+		output := cmd.Flag("output").Value.String()
+		path, err := downloadFile(plUrl, getPlaylistFilePath(output))
 		if err != nil {
 			cobra.CheckErr("Failed to download playlist")
 		}
@@ -82,7 +85,7 @@ var downloadCmd = &cobra.Command{
 				segResolvedUrl := plUrl.ResolveReference(segUrl)
 				log.Info("Downloading segment", "url", segResolvedUrl)
 
-				segPath, err := downloadFile(segResolvedUrl, getDownloadPath(outputDir, segment.URI))
+				segPath, err := downloadFile(segResolvedUrl, getDownloadPath(getPlaylistDirectoryPath(output), segment.URI))
 				if err != nil {
 					log.Error("Failed to download segment", "url", segResolvedUrl, "err", err)
 					cobra.CheckErr("Aborting download due to failed segment download")
@@ -148,6 +151,22 @@ func downloadFile(u *url.URL, path string) (*string, error) {
 	}
 
 	return &path, nil
+}
+
+func getPlaylistFilePath(output string) string {
+	// If output is a directory, append default filename
+	if filepath.Ext(output) == "" {
+		return getDownloadPath(output, defaultPlaylistFilename)
+	}
+	return output
+}
+
+func getPlaylistDirectoryPath(output string) string {
+	// If output is a directory, return it
+	if filepath.Ext(output) == "" {
+		return output
+	}
+	return filepath.Dir(output)
 }
 
 func getDownloadPath(dir, path string) string {
