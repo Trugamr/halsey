@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/charmbracelet/log"
@@ -12,10 +14,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const defaultPlaylistFilename string = "index.m3u8"
-
 func init() {
-	downloadCmd.Flags().StringP("output", "o", "./playlist/"+defaultPlaylistFilename, "Output path for downloaded files")
+	downloadCmd.Flags().StringP("directory", "d", "playlist", "Output directory")
 
 	rootCmd.AddCommand(downloadCmd)
 }
@@ -27,82 +27,21 @@ var downloadCmd = &cobra.Command{
 	Args:  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Check if input is a valid URL
-		plUrl, err := validateUrl(args[0])
+		u, err := validateUrl(args[0])
 		if err != nil {
 			cobra.CheckErr("Invalid playlist URL")
 		}
 
-		log.Info("Downloading HLS stream", "url", plUrl.String())
+		log.Info("Downloading HLS stream", "url", u.String())
 
 		// Collect flags
-		output := cmd.Flag("output").Value.String()
+		directory := cmd.Flag("directory").Value.String()
 
-		// Download and save playlist
-		plPath := getPlaylistFilePath(output)
-		err = downloadFile(plUrl, plPath)
-		if err != nil {
-			cobra.CheckErr("Failed to download playlist")
-		}
+		// Download playlist
+		output := path.Join(directory, "index.m3u8")
+		downloadPlaylist(u, output)
 
-		// Read and parse playlist
-		f, err := os.Open(plPath)
-		if err != nil {
-			log.Error("Failed to open playlist file", "path", plPath, "err", err)
-			cobra.CheckErr("Could not open playlist file")
-		}
-		defer f.Close()
-
-		pl, listType, err := m3u8.DecodeFrom(f, true)
-		if err != nil {
-			log.Error("Failed to parse playlist", "path", plPath, "err", err)
-			cobra.CheckErr("Invalid playlist file")
-		}
-
-		switch listType {
-		case m3u8.MASTER:
-			cobra.CheckErr("Master playlist files are not supported yet")
-		case m3u8.MEDIA:
-			mediapl := pl.(*m3u8.MediaPlaylist)
-
-			for _, segment := range mediapl.Segments {
-				// Ignore segments with no uri
-				if segment == nil {
-					continue
-				}
-
-				// Download and save segment
-				segUrl, err := url.Parse(segment.URI)
-				if err != nil {
-					log.Error("Failed to parse segment url", "url", segment.URI, "err", err)
-					cobra.CheckErr("Aborting download due to invalid segment url")
-				}
-
-				// Check if segment url is absolute
-				// TODO: Support absolute segment urls
-				if segUrl.IsAbs() {
-					log.Error("Absolute segment paths are not supported yet", "url", segUrl.String())
-					cobra.CheckErr("Aborting download due to absolute segment url")
-				}
-
-				// Get absolute segment url from playlist url and segment path
-				segResolvedUrl := plUrl.ResolveReference(segUrl)
-				log.Info("Downloading segment", "url", segResolvedUrl)
-
-				segPath := getDownloadPath(getPlaylistDirectoryPath(plPath), segment.URI)
-
-				err = downloadFile(segResolvedUrl, segPath)
-				if err != nil {
-					log.Error("Failed to download segment", "url", segResolvedUrl, "err", err)
-					cobra.CheckErr("Aborting download due to failed segment download")
-				}
-
-				log.Info("Downloaded segment", "path", segPath)
-			}
-		default:
-			cobra.CheckErr("Unknown playlist type")
-		}
-
-		log.Info("Download complete", "path", plPath)
+		log.Info("Download complete", "output", output)
 	},
 }
 
@@ -117,9 +56,7 @@ func validateUrl(input string) (u *url.URL, err error) {
 	return u, nil
 }
 
-// Download and save file
-//
-// Returns path to downloaded file
+// Download and save file to disk
 func downloadFile(u *url.URL, path string) error {
 	resp, err := http.Get(u.String())
 	if err != nil {
@@ -158,19 +95,112 @@ func downloadFile(u *url.URL, path string) error {
 	return nil
 }
 
-func getPlaylistFilePath(output string) string {
-	// If output is a directory, append default filename
-	if filepath.Ext(output) == "" || filepath.Ext(output) == "." {
-		return getDownloadPath(output, defaultPlaylistFilename)
+// Download playlist and all referenced files
+func downloadPlaylist(u *url.URL, output string) error {
+	// Fetch playlist file
+	resp, err := http.Get(u.String())
+	if err != nil {
+		log.Error("Failed to download playlist", "url", u.String(), "err", err)
+		return err
 	}
-	return output
-}
 
-// Takes playlist output path and returns directory path
-func getPlaylistDirectoryPath(path string) string {
-	return filepath.Dir(path)
-}
+	// Parse playlist file
+	pl, listType, err := m3u8.DecodeFrom(resp.Body, true)
+	if err != nil {
+		log.Error("Failed to parse playlist", "url", u.String(), "err", err)
+		return err
+	}
 
-func getDownloadPath(dir, path string) string {
-	return filepath.Join(dir, path)
+	switch listType {
+	case m3u8.MASTER:
+		pl := pl.(*m3u8.MasterPlaylist)
+
+		// Download master playlist file
+		log.Info("Downloading master playlist", "url", u.String())
+		if err := downloadFile(u, output); err != nil {
+			cobra.CheckErr("Failed to download master playlist")
+		}
+
+		for _, variant := range pl.Variants {
+			if variant == nil {
+				continue
+			}
+
+			vu, err := url.Parse(variant.URI)
+			if err != nil {
+				log.Error("Failed to parse variant url", "url", variant.URI, "err", err)
+				cobra.CheckErr("Aborting download due to invalid variant url")
+			}
+
+			if vu.IsAbs() {
+				log.Error("Absolute variant paths are not supported yet", "url", vu.String())
+				cobra.CheckErr("Aborting download due to absolute variant url")
+			} else {
+				vu = u.ResolveReference(vu)
+			}
+
+			// Process available alternatives for variant
+			for _, alt := range variant.Alternatives {
+				if alt == nil {
+					continue
+				}
+
+				au, err := url.Parse(alt.URI)
+				if err != nil {
+					log.Error("Failed to parse alternative url", "url", alt.URI, "err", err)
+					cobra.CheckErr("Aborting download due to invalid alternative url")
+				}
+
+				if au.IsAbs() {
+					log.Error("Absolute alternative paths are not supported yet", "url", au.String())
+					cobra.CheckErr("Aborting download due to absolute alternative url")
+				} else {
+					au = u.ResolveReference(au)
+				}
+
+				downloadPlaylist(au, path.Join(path.Dir(output), alt.URI))
+			}
+
+			fmt.Println(output, variant.URI)
+			downloadPlaylist(vu, path.Join(path.Dir(output), variant.URI))
+		}
+
+	case m3u8.MEDIA:
+		pl := pl.(*m3u8.MediaPlaylist)
+
+		// Download media playlist file
+		log.Info("Downloading media playlist", "url", u.String())
+		if err := downloadFile(u, output); err != nil {
+			cobra.CheckErr("Failed to download media playlist")
+		}
+
+		for _, segment := range pl.Segments {
+			if segment == nil {
+				continue
+			}
+
+			su, err := url.Parse(segment.URI)
+			if err != nil {
+				log.Error("Failed to parse segment url", "url", segment.URI, "err", err)
+				cobra.CheckErr("Aborting download due to invalid segment url")
+			}
+
+			if su.IsAbs() {
+				fmt.Println(su)
+				log.Error("Absolute segment paths are not supported yet", "url", su.String())
+				cobra.CheckErr("Aborting download due to absolute segment url")
+			} else {
+				su = u.ResolveReference(su)
+
+				// Download segment file
+				log.Info("Downloading segment", "url", su.String())
+				downloadFile(su, path.Join(path.Dir(output), segment.URI))
+			}
+
+		}
+	default:
+		cobra.CheckErr("Unknown playlist type")
+	}
+
+	return nil
 }
