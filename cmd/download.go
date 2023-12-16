@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -161,7 +160,6 @@ func downloadPlaylist(u *url.URL, output string) error {
 				downloadPlaylist(au, path.Join(path.Dir(output), alt.URI))
 			}
 
-			fmt.Println(output, variant.URI)
 			downloadPlaylist(vu, path.Join(path.Dir(output), variant.URI))
 		}
 
@@ -186,7 +184,6 @@ func downloadPlaylist(u *url.URL, output string) error {
 			}
 
 			if su.IsAbs() {
-				fmt.Println(su)
 				log.Error("Absolute segment paths are not supported yet", "url", su.String())
 				cobra.CheckErr("Aborting download due to absolute segment url")
 			} else {
